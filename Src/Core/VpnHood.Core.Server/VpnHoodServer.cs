@@ -54,6 +54,9 @@ public class VpnHoodServer : IAsyncDisposable, IJob
         if (options.SocketFactory == null)
             throw new ArgumentNullException(nameof(options.SocketFactory));
 
+        if (options.VpnAdapter is { IsNatSupported: false })
+            throw new InvalidProgramException("VpnAdapter must support NAT to work with VpnServer.");
+
         AccessManager = accessManager;
         _systemInfoProvider = options.SystemInfoProvider ?? new BasicSystemInfoProvider();
         JobSection = new JobSection(options.ConfigureInterval);
@@ -61,7 +64,7 @@ public class VpnHoodServer : IAsyncDisposable, IJob
             options.NetFilter,
             options.SocketFactory,
             options.Tracker,
-            tunProvider: options.TunProvider,
+            vpnAdapter: options.VpnAdapter,
             serverVersion: ServerVersion,
             storagePath: options.StoragePath,
             new SessionManagerOptions {
@@ -104,9 +107,6 @@ public class VpnHoodServer : IAsyncDisposable, IJob
         }
     }
 
-    /// <summary>
-    ///     Start the server
-    /// </summary>
     public async Task Start()
     {
         using var scope = VhLogger.Instance.BeginScope("Server");
@@ -117,6 +117,8 @@ public class VpnHoodServer : IAsyncDisposable, IJob
         // Report current OS Version
         VhLogger.Instance.LogInformation("Module: {Module}", GetType().Assembly.GetName().FullName);
         VhLogger.Instance.LogInformation("OS: {OS}", _systemInfoProvider.GetSystemInfo());
+        VhLogger.Instance.LogInformation("VirtualNetworkV4: {VirtualIpV4}, VirtualNetworkV6: {VirtualIpV6}", 
+            SessionManager.VirtualIpNetworkV4, SessionManager.VirtualIpNetworkV6);
         VhLogger.Instance.LogInformation("IsDiagnoseMode: {IsDiagnoseMode}", VhLogger.IsDiagnoseMode);
 
         // Report TcpBuffers
@@ -142,7 +144,9 @@ public class VpnHoodServer : IAsyncDisposable, IJob
             VhLogger.Instance.LogError(ex, "Could not recover old sessions.");
         }
 
-        await RunJob().VhConfigureAwait();
+        // ReSharper disable once DisposeOnUsingVariable
+        scope?.Dispose();
+        await JobRunner.RunNow(this).VhConfigureAwait();
     }
 
     private async Task Configure()
@@ -233,10 +237,15 @@ public class VpnHoodServer : IAsyncDisposable, IJob
             }
 
             // Reconfigure server host
-            await ServerHost.Configure(
-                serverConfig.TcpEndPointsValue, serverConfig.UdpEndPointsValue,
-                serverConfig.DnsServersValue, serverConfig.Certificates.Select(x => new X509Certificate2(x.RawData))
-                    .ToArray()).VhConfigureAwait();
+            await ServerHost.Configure(new ServerHostConfiguration
+            {
+                DnsServers = serverConfig.DnsServersValue,
+                TcpEndPoints = serverConfig.TcpEndPointsValue,
+                UdpEndPoints = serverConfig.UdpEndPointsValue,
+                Certificates = serverConfig.Certificates.Select(x => new X509Certificate2(x.RawData)).ToArray(),
+                UdpReceiveBufferSize = serverConfig.SessionOptions.UdpReceiveBufferSizeValue,
+                UdpSendBufferSize = serverConfig.SessionOptions.UdpSendBufferSizeValue,
+            }).VhConfigureAwait();
 
             // Reconfigure dns challenge
             StartDnsChallenge(serverConfig.TcpEndPointsValue.Select(x => x.Address), serverConfig.DnsChallenge);
@@ -341,8 +350,9 @@ public class VpnHoodServer : IAsyncDisposable, IJob
 
         // exclude virtual ip if network isolation is enabled
         if (netFilterOptions.NetworkIsolationValue) {
-            netFilter.BlockedIpRanges = netFilter.BlockedIpRanges.Exclude(virtualIpNetworkV4.ToIpRange());
-            netFilter.BlockedIpRanges = netFilter.BlockedIpRanges.Exclude(virtualIpNetworkV6.ToIpRange());
+            netFilter.BlockedIpRanges = netFilter.BlockedIpRanges
+                .Union(virtualIpNetworkV4.ToIpRange())
+                .Union(virtualIpNetworkV6.ToIpRange());
         }
 
         // exclude listening ip

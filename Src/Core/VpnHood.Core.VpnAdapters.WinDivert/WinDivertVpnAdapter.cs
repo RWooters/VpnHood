@@ -27,15 +27,17 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
     private IPAddress[] _dnsServers = [];
     private readonly TimeoutDictionary<ushort, TimeoutItem<IPAddress>> _lastDnsServersV4 = new(TimeSpan.FromSeconds(30));
     private readonly TimeoutDictionary<ushort, TimeoutItem<IPAddress>> _lastDnsServersV6 = new(TimeSpan.FromSeconds(30));
+    private readonly bool _excludeLocalNetwork = adapterSettings.ExcludeLocalNetwork;
 
     public const short ProtectedTtl = 111;
     public override bool IsAppFilterSupported => false;
+    protected override bool IsSocketProtectedByBind => false;
     public override bool IsNatSupported => false;
     protected override string? AppPackageId => null;
 
     protected override Task AdapterAdd(CancellationToken cancellationToken)
     {
-        if (adapterSettings.MaxPacketCount!=1)
+        if (adapterSettings.MaxPacketCount != 1)
             throw new InvalidOperationException("WinDivert adapter supports only 1 packet at a time.");
 
         // initialize devices
@@ -66,9 +68,12 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
         if (_device == null)
             throw new InvalidOperationException("Device is not initialized.");
 
+        var ipRanges = _includeIpNetworks.ToIpRanges();
+        if (_excludeLocalNetwork)
+            ipRanges = ipRanges.Exclude(IpNetwork.LocalNetworks.ToIpRanges());
+        
         // create include and exclude phrases
         var phraseX = "true";
-        var ipRanges = _includeIpNetworks.ToIpRanges();
         if (!ipRanges.IsAll()) {
             var phrases = ipRanges.Select(x => x.FirstIpAddress.Equals(x.LastIpAddress)
                 ? $"{Ip(x)}.DstAddr=={x.FirstIpAddress}"
@@ -110,7 +115,7 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
         return Task.CompletedTask;
     }
 
-    protected override Task AddRoute(IpNetwork ipNetwork, IPAddress gatewayIp, CancellationToken cancellationToken)
+    protected override Task AddRoute(IpNetwork ipNetwork, CancellationToken cancellationToken)
     {
         _includeIpNetworks.Add(ipNetwork);
         return Task.CompletedTask;
@@ -165,10 +170,21 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
         ProcessReadPacket(ipPacket);
         return ipPacket;
     }
-    
-    public override void ProtectSocket(Socket socket)
+
+    public override bool ProtectSocket(Socket socket)
     {
+        // must works with loopback
+        var ipAddress = socket.AddressFamily.IsV4() ? IPAddress.Any : IPAddress.IPv6Any;
+        socket.Bind(new IPEndPoint(ipAddress, 0));
         socket.Ttl = ProtectedTtl;
+        return true;
+    }
+
+    public override bool ProtectSocket(Socket socket, IPAddress ipAddress)
+    {
+        base.ProtectSocket(socket, ipAddress);
+        socket.Ttl = ProtectedTtl;
+        return true;
     }
 
     protected virtual void ProcessReadPacket(IPPacket ipPacket)
@@ -274,7 +290,7 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
             // update the dns server
             if (dnsServer != null) {
                 ipPacket.DestinationAddress = dnsServer;
-                ipPacket.UpdateIpChecksum();
+                ipPacket.UpdateAllChecksums();
             }
         }
         else {
@@ -286,7 +302,7 @@ public class WinDivertVpnAdapter(WinDivertVpnAdapterSettings adapterSettings) :
             if (lastDnsServers.TryGetValue(udpPacket.DestinationPort, out var dnsServer))
                 ipPacket.SourceAddress = dnsServer.Value;
 
-            ipPacket.UpdateIpChecksum();
+            ipPacket.UpdateAllChecksums();
         }
     }
 

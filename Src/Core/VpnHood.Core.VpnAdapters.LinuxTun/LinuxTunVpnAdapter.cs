@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using PacketDotNet;
 using VpnHood.Core.Toolkit.Exceptions;
+using VpnHood.Core.Toolkit.Logging;
 using VpnHood.Core.Toolkit.Net;
 using VpnHood.Core.Toolkit.Utils;
 using VpnHood.Core.VpnAdapters.Abstractions;
@@ -16,6 +17,9 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
     private int _tunAdapterFd;
     private int? _metric;
     private string? _primaryAdapterName;
+    private StructPollfd[]? _pollFdReads;
+    private StructPollfd[]? _pollFdWrites;
+    protected override bool IsSocketProtectedByBind => true;
     public override bool IsNatSupported => true;
     public override bool IsAppFilterSupported => false;
     protected override string? AppPackageId => null;
@@ -38,25 +42,25 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
     protected override async Task AdapterAdd(CancellationToken cancellationToken)
     {
         // Get the primary adapter name
-        Logger.LogDebug("Getting the primary adapter name...");
+        VhLogger.Instance.LogDebug("Getting the primary adapter name...");
         _primaryAdapterName = await GetPrimaryAdapterName(cancellationToken);
-        Logger.LogDebug("Primary adapter name is {PrimaryAdapterName}", _primaryAdapterName);
+        VhLogger.Instance.LogDebug("Primary adapter name is {PrimaryAdapterName}", _primaryAdapterName);
 
         // delete existing tun interface
-        Logger.LogDebug("Clean previous tun adapter...");
+        VhLogger.Instance.LogDebug("Clean previous tun adapter...");
         AdapterRemove();
 
         // Create and configure tun interface
-        Logger.LogDebug("Creating tun adapter...");
+        VhLogger.Instance.LogDebug("Creating tun adapter...");
         await ExecuteCommandAsync($"ip tuntap add dev {AdapterName} mode tun", cancellationToken).VhConfigureAwait();
 
         // Enable IP forwarding
-        Logger.LogDebug("Enabling IP forwarding...");
+        VhLogger.Instance.LogDebug("Enabling IP forwarding...");
         await ExecuteCommandAsync("sysctl -w net.ipv4.ip_forward=1", cancellationToken).VhConfigureAwait();
         await ExecuteCommandAsync("sysctl -w net.ipv6.conf.all.forwarding=1", cancellationToken).VhConfigureAwait();
 
         // Bring up the interface
-        Logger.LogDebug("Bringing up the TUN...");
+        VhLogger.Instance.LogDebug("Bringing up the TUN...");
         await ExecuteCommandAsync($"ip link set {AdapterName} up", cancellationToken).VhConfigureAwait();
     }
 
@@ -71,14 +75,14 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
 
         // Remove existing tun interface
         if (tunAdapterExists) {
-            Logger.LogDebug("Removing existing {AdapterName} TUN adapter (if any)...", AdapterName);
+            VhLogger.Instance.LogDebug("Removing existing {AdapterName} TUN adapter (if any)...", AdapterName);
             VhUtils.TryInvoke($"remove existing {AdapterName} TUN adapter", () =>
                 ExecuteCommand($"ip link delete {AdapterName}"));
         }
 
         // Remove previous NAT iptables record
         if (UseNat) {
-            Logger.LogDebug("Removing previous NAT iptables record for {AdapterName} TUN adapter...", AdapterName);
+            VhLogger.Instance.LogDebug("Removing previous NAT iptables record for {AdapterName} TUN adapter...", AdapterName);
             if (AdapterIpNetworkV4 != null)
                 TryRemoveNat(AdapterIpNetworkV4);
 
@@ -90,8 +94,14 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
     protected override Task AdapterOpen(CancellationToken cancellationToken)
     {
         // Open TUN Adapter
-        Logger.LogDebug("Opening the TUN adapter...");
+        VhLogger.Instance.LogDebug("Opening the TUN adapter...");
         _tunAdapterFd = OpenTunAdapter(AdapterName, false);
+        _pollFdReads = [new StructPollfd {
+            Fd = _tunAdapterFd, Events = OsConstants.Pollin
+        }];
+        _pollFdWrites = [new StructPollfd {
+            Fd = _tunAdapterFd, Events = OsConstants.Pollout }];
+
         return Task.CompletedTask;
     }
 
@@ -113,17 +123,30 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
         var iptables = ipNetwork.IsV4 ? "iptables" : "ip6tables";
         await ExecuteCommandAsync($"{iptables} -t nat -A POSTROUTING -s {ipNetwork} -o {_primaryAdapterName} -j MASQUERADE",
                 cancellationToken).VhConfigureAwait();
+
+        // sudo iptables 
+        await ExecuteCommandAsync($"{iptables} -A FORWARD -i {AdapterName} -o {_primaryAdapterName} -j ACCEPT",
+            cancellationToken).VhConfigureAwait();
+
+        // sudo iptables 
+        await ExecuteCommandAsync($"{iptables} -A FORWARD -i {_primaryAdapterName} -o {AdapterName} -m state --state RELATED,ESTABLISHED -j ACCEPT",
+            cancellationToken).VhConfigureAwait();
     }
 
     private void TryRemoveNat(IpNetwork ipNetwork)
     {
+        var iptables = ipNetwork.IsV4 ? "iptables" : "ip6tables";
+
         // Remove NAT rule. try until no rule found
         var res = "ok";
         while (!string.IsNullOrEmpty(res)) {
-            var iptables = ipNetwork.IsV4 ? "iptables" : "ip6tables";
             res = VhUtils.TryInvoke("Remove NAT rule", () =>
                 ExecuteCommand($"{iptables} -t nat -D POSTROUTING -s {ipNetwork} -o {_primaryAdapterName} -j MASQUERADE"));
         }
+
+        // Remove forwarding rules
+        VhUtils.TryInvoke("Remove NAT forwarding rules...", () =>
+            ExecuteCommand($"{iptables}-save | grep -v -w \"{AdapterName}\" | {iptables}-restore"));
     }
 
     protected override async Task AddAddress(IpNetwork ipNetwork, CancellationToken cancellationToken)
@@ -132,11 +155,11 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
             cancellationToken).VhConfigureAwait();
     }
 
-    protected override async Task AddRoute(IpNetwork ipNetwork, IPAddress gatewayIp, CancellationToken cancellationToken)
+    protected override async Task AddRoute(IpNetwork ipNetwork, CancellationToken cancellationToken)
     {
         var command = ipNetwork.IsV4
-            ? $"ip route add {ipNetwork} dev {AdapterName} via {gatewayIp}"
-            : $"ip -6 route add {ipNetwork} dev {AdapterName} via {gatewayIp}";
+            ? $"ip route add {ipNetwork} dev {AdapterName}"
+            : $"ip -6 route add {ipNetwork} dev {AdapterName}";
 
         if (_metric != null)
             command += $" metric {_metric}";
@@ -172,32 +195,31 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
 
     protected override void WaitForTunRead()
     {
-        WaitForTun(PollEvent.In);
+        if (_pollFdReads != null)
+            WaitForTun(_pollFdReads);
     }
     protected override void WaitForTunWrite()
     {
-        WaitForTun(PollEvent.Out);
+        if (_pollFdWrites != null)
+            WaitForTun(_pollFdWrites);
     }
 
-    private void WaitForTun(PollEvent pollEvent)
-    {
-        var pollFd = new PollFD {
-            fd = _tunAdapterFd,
-            events = (short)pollEvent
-        };
 
+    private static void WaitForTun(StructPollfd[] pollFds)
+    {
         while (true) {
-            var result = LinuxAPI.poll([pollFd], 1, -1); // Blocks until data arrives
+            var result = LinuxAPI.poll(pollFds, 1, -1);
             if (result >= 0)
                 break; // Success, exit loop
 
             var errorCode = Marshal.GetLastWin32Error();
-            if (errorCode == LinuxAPI.EINTR)
+            if (errorCode == OsConstants.Eintr)
                 continue; // Poll was interrupted, retry
 
             throw new PInvokeException("Failed to poll the TUN device for new data.", errorCode);
         }
     }
+
     protected override bool WritePacket(IPPacket ipPacket)
     {
         var packetBytes = ipPacket.Bytes;
@@ -214,13 +236,13 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
             var errorCode = Marshal.GetLastWin32Error();
             switch (errorCode) {
                 // Buffer full, wait
-                case LinuxAPI.EAGAIN:
+                case OsConstants.Eagain:
                     if (offset > 0)
                         throw new SystemException("Partial write to TUN device. System in unstable");
                     return false;
 
                 // Interrupted, retry
-                case LinuxAPI.EINTR:
+                case OsConstants.Eintr:
                     continue;
 
                 default:
@@ -243,12 +265,12 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
             var errorCode = Marshal.GetLastWin32Error();
             switch (errorCode) {
                 // No data available, wait
-                case LinuxAPI.EAGAIN:
+                case OsConstants.Eagain:
                     return null;
 
                 // Interrupted, retry
-                case LinuxAPI.EINTR: {
-                        Logger.LogTrace("Read from TUN was interrupted. Retrying...");
+                case OsConstants.Eintr: {
+                        VhLogger.Instance.LogTrace("Read from TUN was interrupted. Retrying...");
                         continue;
                     }
 
@@ -263,24 +285,24 @@ public class LinuxTunVpnAdapter(LinuxVpnAdapterSettings adapterSettings)
     private static int OpenTunAdapter(string adapterName, bool blockingMode)
     {
         // Open the TUN device file
-        var tunDeviceFd = LinuxAPI.open("/dev/net/tun", LinuxAPI.ORdwr);
+        var tunDeviceFd = LinuxAPI.open("/dev/net/tun", OsConstants.ORdwr);
         if (tunDeviceFd < 0)
             throw new InvalidOperationException("Failed to open TUN device.");
 
         // Configure the device
         var ifr = new Ifreq {
             ifr_name = adapterName,
-            ifr_flags = LinuxAPI.IFF_TUN | LinuxAPI.IFF_NO_PI
+            ifr_flags = (short)(InterfaceFlag.IffTun | InterfaceFlag.IffNoPi)
         };
 
-        var ioctlResult = LinuxAPI.ioctl(tunDeviceFd, LinuxAPI.TUNSETIFF, ref ifr);
+        var ioctlResult = LinuxAPI.ioctl(tunDeviceFd, OsConstants.Tunsetiff, ref ifr);
         if (ioctlResult < 0) {
             LinuxAPI.close(tunDeviceFd);
             throw new PInvokeException($"Failed to configure TUN device. IoctlResult: {ioctlResult}");
         }
 
         if (!blockingMode) {
-            if (LinuxAPI.fcntl(tunDeviceFd, LinuxAPI.F_SETFL, LinuxAPI.O_NONBLOCK) < 0) {
+            if (LinuxAPI.fcntl(tunDeviceFd, OsConstants.FSetfl, OsConstants.ONonblock) < 0) {
                 LinuxAPI.close(tunDeviceFd);
                 throw new PInvokeException("Failed to set TUN device to non-blocking mode.");
             }

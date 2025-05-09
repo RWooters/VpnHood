@@ -1,5 +1,7 @@
-﻿using System.Net.Sockets;
+﻿using System.Net;
+using System.Net.Sockets;
 using PacketDotNet;
+using VpnHood.Core.Packets;
 
 namespace VpnHood.Core.VpnAdapters.Abstractions;
 
@@ -23,10 +25,16 @@ public class NullVpnAdapter : IVpnAdapter
         Started = false;    
     }
 
-    public virtual void ProtectSocket(Socket socket)
+    public virtual bool ProtectSocket(Socket socket)
     {
-        // nothing
+        return true;
     }
+
+    public virtual bool ProtectSocket(Socket socket, IPAddress ipAddress)
+    {
+        return true;
+    }
+
 
     public virtual void SendPacket(IPPacket ipPacket)
     {

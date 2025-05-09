@@ -68,10 +68,9 @@ public static class IpPacketExtensions
 
     public static void UpdateIpChecksum(this IPPacket ipPacket)
     {
-        // ICMPv6 checksum needs to be updated if IPv6 packet changes
-        if (ipPacket.Protocol == ProtocolType.IcmpV6) {
+        // ICMPv6 & UDP & TCP checksum needs to be updated if IPv6 packet changes because they have pseudo header
+        if (ipPacket.Protocol is ProtocolType.IcmpV6 or ProtocolType.Udp or ProtocolType.Tcp) {
             ipPacket.UpdatePayloadChecksum();
-            ipPacket.UpdateCalculatedValues();
         }
 
         // ipv4 packet checksum needs to be updated if IPv4 packet changes
@@ -80,7 +79,8 @@ public static class IpPacketExtensions
             ipPacket.UpdateCalculatedValues();
         }
     }
-    public static void UpdatePayloadChecksum(this IPPacket ipPacket, bool throwIfNotSupported = true)
+
+    public static void UpdatePayloadChecksum(this IPPacket ipPacket, bool throwIfNotSupported = false)
     {
         switch (ipPacket.Protocol) {
             case ProtocolType.Tcp:
@@ -109,12 +109,12 @@ public static class IpPacketExtensions
 
             default:
                 if (throwIfNotSupported)
-                    throw new NotSupportedException("Does not support this packet!");
+                    throw new NotSupportedException("Does not support this packet.");
                 break;
         }
     }
 
-    public static void UpdateAllChecksums(this IPPacket ipPacket, bool throwIfNotSupported = true)
+    public static void UpdateAllChecksums(this IPPacket ipPacket, bool throwIfNotSupported = false)
     {
         ipPacket.UpdatePayloadChecksum(throwIfNotSupported);
 

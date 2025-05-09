@@ -10,7 +10,7 @@ public class ClientServerLocationInfo : ServerLocationInfo
 
     public static ClientServerLocationInfo[] CreateFromToken(ClientProfile clientProfile)
     {
-        var clientCountry = VpnHoodApp.Instance.GetClientCountryByServer();
+        var clientCountry = VpnHoodApp.Instance.GetClientCountry();
         var token = clientProfile.Token;
 
         // get country policy
@@ -62,7 +62,7 @@ public class ClientServerLocationInfo : ServerLocationInfo
         Options.Normal = Options.HasFree ? policy.Normal : null;
         Options.PremiumByTrial = Options.HasPremium ? policy.PremiumByTrial : null;
         Options.PremiumByRewardedAd = Options.HasPremium && isRewardedAdSupported ? policy.PremiumByRewardedAd : null;
-        Options.PremiumByPurchase = policy.PremiumByPurchase && isBillingSupported;
+        Options.PremiumByPurchase = policy.PremiumByPurchase && (isBillingSupported || policy.PurchaseUrl != null);
         Options.PremiumByCode = policy.PremiumByCode;
 
         Options.Prompt = Options.PremiumByTrial != null || Options.PremiumByRewardedAd != null;

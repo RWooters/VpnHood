@@ -1,5 +1,15 @@
-# Upcoming 
+# v6.0.696
+* Improve: Watching media streaming
+* Improve: Performance and stability
+* Fix: Network Isolation
+* Fix: Some Android devices could not open websites after connecting
+
+# v6.0.689
+* Fix: Calculate UDP checksum and DNS response
+
+# v6.0.680
 * Fix: Pause server while configuring swap file on Linux
+* Feature: Use TunAdapter on Linux, improve performance
 
 # v6.0.656
 * Update: Improve virtual IP allocation

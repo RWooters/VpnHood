@@ -23,15 +23,13 @@ using VpnHood.Core.Tunneling.ClientStreams;
 using VpnHood.Core.Tunneling.Messaging;
 using VpnHood.Core.Tunneling.Sockets;
 using VpnHood.Core.VpnAdapters.Abstractions;
-using FastDateTime = VpnHood.Core.Toolkit.Utils.FastDateTime;
-using PacketReceivedEventArgs = VpnHood.Core.VpnAdapters.Abstractions.PacketReceivedEventArgs;
 using ProtocolType = PacketDotNet.ProtocolType;
 
 namespace VpnHood.Core.Client;
 
 public class VpnHoodClient : IJob, IAsyncDisposable
 {
-    private const int MaxProtocolVersion = 7;
+    private const int MaxProtocolVersion = 8;
     private const int MinProtocolVersion = 4;
     private bool _disposed;
     private readonly bool _autoDisposeVpnAdapter;
@@ -67,7 +65,9 @@ public class VpnHoodClient : IJob, IAsyncDisposable
     private readonly string[]? _excludeApps;
     private ClientSessionStatus? _sessionStatus;
     private IPAddress[] _dnsServers;
-    
+    private readonly int _udpSendBufferSize;
+    private readonly int _udpReceiveBufferSize;
+
     private ConnectorService ConnectorService => VhUtils.GetRequiredInstance(_connectorService);
     internal Tunnel Tunnel { get; }
     public ISocketFactory SocketFactory { get; }
@@ -137,6 +137,8 @@ public class VpnHoodClient : IJob, IAsyncDisposable
         _excludeApps = options.ExcludeApps;
         _includeApps = options.IncludeApps;
         _allowRewardedAd = options.AllowRewardedAd;
+        _udpReceiveBufferSize = options.UdpReceiveBufferSize ?? TunnelDefaults.ClientUdpReceiveBufferSize;
+        _udpSendBufferSize = options.UdpSendBufferSize ?? TunnelDefaults.ClientUdpSendBufferSize;
         _canExtendByRewardedAdThreshold = options.CanExtendByRewardedAdThreshold;
         _serverFinder = new ServerFinder(socketFactory, token.ServerToken,
             serverLocation: options.ServerLocation,
@@ -166,15 +168,14 @@ public class VpnHoodClient : IJob, IAsyncDisposable
 
         // Tunnel
         Tunnel = new Tunnel();
-        Tunnel.PacketReceived += Tunnel_OnPacketReceived;
-
+        Tunnel.PacketReceived += Tunnel_PacketReceived;
 
         // create proxy host
         _clientHost = new ClientHost(this, options.TcpProxyCatcherAddressIpV4, options.TcpProxyCatcherAddressIpV6);
 
         // init vpnAdapter events
         vpnAdapter.Disposed += (_, _) => _ = DisposeAsync();
-        vpnAdapter.PacketReceived += VpnAdapter_OnPacketReceived;
+        vpnAdapter.PacketReceived += VpnAdapter_PacketReceived;
 
         // Create simple disposable objects
         _cancellationTokenSource = new CancellationTokenSource();
@@ -220,7 +221,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
         cancellationToken = linkedCancellationTokenSource.Token;
 
         // connect to host
-        var tcpClient = SocketFactory.CreateTcpClient(hostEndPoint.AddressFamily);
+        var tcpClient = SocketFactory.CreateTcpClient(hostEndPoint);
         await VhUtils.RunTask(tcpClient.ConnectAsync(hostEndPoint.Address, hostEndPoint.Port),
             cancellationToken: cancellationToken).VhConfigureAwait();
 
@@ -268,7 +269,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
             _serverFinder.IncludeIpV6 = IsIpV6SupportedByClient;
             ThreadPool.GetMinThreads(out var workerThreads, out var completionPortThreads);
             VhLogger.Instance.LogInformation(
-                "UseUdpChannel: {UseUdpChannel}, DropUdp: {DropUdp}, DropQuic: {DropQuic}, UseTcpOverTun: {UseTcpOverTun}" +
+                "UseUdpChannel: {UseUdpChannel}, DropUdp: {DropUdp}, DropQuic: {DropQuic}, UseTcpOverTun: {UseTcpOverTun}, " +
                 "IncludeLocalNetwork: {IncludeLocalNetwork}, MinWorkerThreads: {WorkerThreads}, " +
                 "CompletionPortThreads: {CompletionPortThreads}, ClientIpV6: {ClientIpV6}, ProcessId: {ProcessId}",
                 UseUdpChannel, DropUdp, DropQuic, UseTcpOverTun, IncludeLocalNetwork, workerThreads,
@@ -277,7 +278,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
             // report version
             VhLogger.Instance.LogInformation(
                 "ClientVersion: {ClientVersion}, " +
-                "ClientMinProtocolVersion: {ClientMinProtocolVersion}, ClientMinProtocolVersion: {ClientMaxProtocolVersion}, " +
+                "ClientMinProtocolVersion: {ClientMinProtocolVersion}, ClientMaxProtocolVersion: {ClientMaxProtocolVersion}, " +
                 "ClientId: {ClientId}",
                 Version, MinProtocolVersion, MaxProtocolVersion, VhLogger.FormatId(ClientId));
 
@@ -305,12 +306,11 @@ public class VpnHoodClient : IJob, IAsyncDisposable
         var includeIpRanges = VpnAdapterIncludeIpRanges;
 
         // exclude server if ProtectClient is not supported to prevent loop
-        if (!_vpnAdapter.CanProtectSocket)
+        if (!_vpnAdapter.CanProtectSocket) 
             includeIpRanges = includeIpRanges.Exclude(hostIpAddress);
 
-        // exclude local networks
-        if (!IncludeLocalNetwork)
-            includeIpRanges = includeIpRanges.Exclude(IpNetwork.LocalNetworks.ToIpRanges());
+        // local networks automatically not routed
+        includeIpRanges = includeIpRanges.Union(IpNetwork.LocalNetworks.ToIpRanges());
 
         // Make sure CatcherAddress is included
         includeIpRanges = includeIpRanges.Union([
@@ -322,13 +322,13 @@ public class VpnHoodClient : IJob, IAsyncDisposable
     }
 
     // WARNING: Performance Critical!
-    private void Tunnel_OnPacketReceived(object sender, ChannelPacketReceivedEventArgs e)
+    private void Tunnel_PacketReceived(object sender, PacketReceivedEventArgs e)
     {
         _vpnAdapter.SendPackets(e.IpPackets);
     }
 
     // WARNING: Performance Critical!
-    private void VpnAdapter_OnPacketReceived(object sender, PacketReceivedEventArgs e)
+    private void VpnAdapter_PacketReceived(object sender, PacketReceivedEventArgs e)
     {
         // stop traffic if the client has been disposed
         if (_disposed || _initConnectedTime is null)
@@ -355,6 +355,11 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                         droppedPackets.Add(ipPacket);
                     }
 
+                    // TcpHost has to manage its own packets
+                    else if (_clientHost.IsOwnPacket(ipPacket)) {
+                        tcpHostPackets.Add(ipPacket);
+                    }
+
                     // tcp already check for InInRange and IpV6 and Proxy
                     else if (ipPacket.Protocol == ProtocolType.Tcp) {
                         if (_isTunProviderSupported && UseTcpOverTun && IsInIpRange(ipPacket.DestinationAddress))
@@ -363,9 +368,9 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                             tcpHostPackets.Add(ipPacket);
                     }
 
-                    // Drop IPv6 if not support. It must be TCP, because TcpHost already check the ranges
+                    // Drop IPv6 if not support
                     else if (isIpV6 && !IsIpV6SupportedByServer) {
-                        if (!IsInIpRange(ipPacket.DestinationAddress))
+                        if (IsIpV6SupportedByClient && !IsInIpRange(ipPacket.DestinationAddress))
                             proxyPackets.Add(ipPacket);
                         else
                             droppedPackets.Add(ipPacket);
@@ -374,8 +379,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                     // ICMP packet must go through tunnel because PingProxy does not support protect socket
                     else if (ipPacket.Protocol is ProtocolType.Icmp or ProtocolType.IcmpV6) {
                         if (IsIcmpControlMessage(ipPacket))
-                            droppedPackets
-                                .Add(ipPacket); // ICMP can not be proxied so we don't need to check InInRange
+                            droppedPackets.Add(ipPacket); // ICMP can not be proxied so we don't need to check InInRange
                         else
                             tunnelPackets.Add(ipPacket);
                     }
@@ -406,10 +410,10 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                     _ = ManageDatagramChannels(_cancellationTokenSource.Token);
 
                 if (tunnelPackets.Count > 0)
-                    Tunnel.SendPackets(tunnelPackets, _cancellationTokenSource.Token);
+                    Tunnel.SendPacketsAsync(tunnelPackets).GetAwaiter().GetResult();
 
                 if (proxyPackets.Count > 0)
-                    _proxyManager.SendPackets(proxyPackets).Wait(_cancellationTokenSource.Token);
+                    _proxyManager.SendPackets(proxyPackets).GetAwaiter().GetResult();
 
                 if (tcpHostPackets.Count > 0)
                     _vpnAdapter.SendPackets(_clientHost.ProcessOutgoingPacket(tcpHostPackets));
@@ -487,7 +491,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
             if (_disposed) return false;
             if (_datagramChannelsSemaphore.CurrentCount == 0) return false;
             if (UseUdpChannel != Tunnel.IsUdpMode) return true;
-            return !UseUdpChannel && Tunnel.DatagramChannelCount < _maxDatagramChannelCount;
+            return !UseUdpChannel && Tunnel.DatagramChannelCount < Tunnel.MaxDatagramChannelCount;
         }
     }
 
@@ -523,8 +527,7 @@ public class VpnHoodClient : IJob, IAsyncDisposable
 
     private async Task AddUdpChannel()
     {
-        if (HostTcpEndPoint == null)
-            throw new InvalidOperationException($"{nameof(HostTcpEndPoint)} is not initialized!");
+        if (HostTcpEndPoint == null) throw new InvalidOperationException($"{nameof(HostTcpEndPoint)} is not initialized!");
         if (VhUtils.IsNullOrEmpty(ServerSecret)) throw new Exception("ServerSecret has not been set.");
         if (VhUtils.IsNullOrEmpty(_sessionKey)) throw new Exception("Server UdpKey has not been set.");
         if (HostUdpEndPoint == null) {
@@ -533,12 +536,10 @@ public class VpnHoodClient : IJob, IAsyncDisposable
         }
 
         var udpClient = SocketFactory.CreateUdpClient(HostTcpEndPoint.AddressFamily);
-        var localEndPoint = HostTcpEndPoint.IsV4() ? new IPEndPoint(IPAddress.Any, 0) : new IPEndPoint(IPAddress.IPv6Any, 0);
-        udpClient.Client.Bind(localEndPoint);
-
         var udpChannel = new UdpChannel(SessionId, _sessionKey, false, ConnectorService.ProtocolVersion);
         try {
             var udpChannelTransmitter = new ClientUdpChannelTransmitter(udpChannel, udpClient, ServerSecret);
+            udpChannelTransmitter.Configure(sendBufferSize: _udpSendBufferSize, receiveBufferSize: _udpReceiveBufferSize);
             udpChannel.SetRemote(udpChannelTransmitter, HostUdpEndPoint);
             Tunnel.AddChannel(udpChannel);
         }
@@ -571,7 +572,9 @@ public class VpnHoodClient : IJob, IAsyncDisposable
             var clientInfo = new ClientInfo {
                 ClientId = ClientId,
                 ClientVersion = Version.ToString(3),
+#pragma warning disable CS0618 // Type or member is obsolete
                 ProtocolVersion = _connectorService.ProtocolVersion,
+#pragma warning restore CS0618 // Type or member is obsolete
                 MinProtocolVersion = MinProtocolVersion,
                 MaxProtocolVersion = MaxProtocolVersion,
                 UserAgent = UserAgent
@@ -598,19 +601,20 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                 helloResponse.MinProtocolVersion = 5;
                 helloResponse.MaxProtocolVersion = 5;
             }
-#pragma warning restore CS0618 // Type or member is obsolete
 
-            if (helloResponse.MinProtocolVersion < MinProtocolVersion)
+            var protocolVersion = helloResponse.ProtocolVersion ?? Math.Min(helloResponse.MaxProtocolVersion, MaxProtocolVersion);
+            if (protocolVersion < MinProtocolVersion)
                 throw new SessionException(SessionErrorCode.UnsupportedServer,
                     "The server is outdated and does not support by your app!");
 
-            if (helloResponse.MaxProtocolVersion > MaxProtocolVersion)
+            if (protocolVersion > MaxProtocolVersion)
                 throw new SessionException(SessionErrorCode.UnsupportedServer,
                     "This app is outdated and does not support by the server!");
+#pragma warning restore CS0618 // Type or member is obsolete
 
             // initialize the connector
             _connectorService.Init(
-                Math.Min(helloResponse.MaxProtocolVersion, MaxProtocolVersion),
+                protocolVersion,
                 Debugger.IsAttached ? Timeout.InfiniteTimeSpan : helloResponse.RequestTimeout,
                 helloResponse.ServerSecret,
                 helloResponse.TcpReuseTimeout);
@@ -620,11 +624,12 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                 "Hurray! Client has been connected! " +
                 $"SessionId: {VhLogger.FormatId(helloResponse.SessionId)}, " +
                 $"ServerVersion: {helloResponse.ServerVersion}, " +
-                $"ServerMinProtocolVersion: {helloResponse.MinProtocolVersion}, " +
-                $"ServerMaxProtocolVersion: {helloResponse.MaxProtocolVersion}, " +
+                $"ProtocolVersion: {protocolVersion}, " +
                 $"CurrentProtocolVersion: {_connectorService.ProtocolVersion}, " +
-                $"ClientIp: {VhLogger.Format(helloResponse.ClientPublicAddress)}",
-                $"IsTunProviderSupported: {helloResponse.IsTunProviderSupported}",
+                $"ClientIp: {VhLogger.Format(helloResponse.ClientPublicAddress)}, " +
+                $"IsTunProviderSupported: {helloResponse.IsTunProviderSupported}, " +
+                $"NetworkV4: {helloResponse.VirtualIpNetworkV4}, " +
+                $"NetworkV6: {helloResponse.VirtualIpNetworkV6}, " +
                 $"ClientCountry: {helloResponse.ClientCountry}");
 
             // get session id
@@ -677,6 +682,12 @@ public class VpnHoodClient : IJob, IAsyncDisposable
 
             else if (helloResponse.SuppressedTo == SessionSuppressType.Other)
                 VhLogger.Instance.LogWarning("You suppressed a session of another client!");
+
+            // disable UdpChannel if not supported
+            if (HostUdpEndPoint is null) {
+                VhLogger.Instance.LogWarning("Server does not support UDP channel.");
+                _useUdpChannel = false;
+            }
 
             // set the session info
             SessionInfo = new SessionInfo {
@@ -735,10 +746,22 @@ public class VpnHoodClient : IJob, IAsyncDisposable
             if (IncludeIpRanges.IsAll())
                 IncludeIpRanges = [];
 
+            // Preparing tunnel
+            VhLogger.Instance.LogInformation("Configuring Datagram Channels...");
+            Tunnel.Mtu = Math.Min(TunnelDefaults.Mtu, helloResponse.Mtu - TunnelDefaults.MtuOverhead);
+            Tunnel.RemoteMtu = helloResponse.Mtu;
+            Tunnel.MaxDatagramChannelCount = helloResponse.MaxDatagramChannelCount != 0
+                ? Tunnel.MaxDatagramChannelCount =
+                    Math.Min(_maxDatagramChannelCount, helloResponse.MaxDatagramChannelCount)
+                : _maxDatagramChannelCount;
+
+            // manage datagram channels
+            await ManageDatagramChannels(cancellationToken).VhConfigureAwait();
+
             // prepare packet capture
+            // Set a default to capture & drop the packets if the server does not provide a network
             var networkV4 = helloResponse.VirtualIpNetworkV4 ?? new IpNetwork(IPAddress.Parse("10.255.0.2"), 32);
             var networkV6 = helloResponse.VirtualIpNetworkV6 ?? new IpNetwork(IPAddressUtil.GenerateUlaAddress(0x1001), 128);
-
             var longIncludeNetworks = string.Join(", ", VpnAdapterIncludeIpRanges.ToIpNetworks().Select(VhLogger.Format));
             VhLogger.Instance.LogInformation(
                 "Starting VpnAdapter... DnsServers: {DnsServers}, IncludeNetworks: {longIncludeNetworks}",
@@ -749,23 +772,13 @@ public class VpnHoodClient : IJob, IAsyncDisposable
                 DnsServers = SessionInfo.DnsServers,
                 VirtualIpNetworkV4 = networkV4,
                 VirtualIpNetworkV6 = networkV6,
-                Mtu = TunnelDefaults.MtuWithoutFragmentation,
+                Mtu = Tunnel.Mtu,
                 IncludeNetworks = BuildVpnAdapterIncludeNetworks(_connectorService.EndPointInfo.TcpEndPoint.Address),
                 SessionName = SessionName,
                 ExcludeApps = _excludeApps,
                 IncludeApps = _includeApps
             };
             await _vpnAdapter.Start(adapterOptions, cancellationToken);
-
-            // Preparing tunnel
-            VhLogger.Instance.LogInformation("Configuring Datagram Channels...");
-            Tunnel.MaxDatagramChannelCount = helloResponse.MaxDatagramChannelCount != 0
-                ? Tunnel.MaxDatagramChannelCount =
-                    Math.Min(_maxDatagramChannelCount, helloResponse.MaxDatagramChannelCount)
-                : _maxDatagramChannelCount;
-
-            // manage datagram channels
-            await ManageDatagramChannels(cancellationToken).VhConfigureAwait();
         }
         catch (RedirectHostException ex) {
             if (!allowRedirect) {
@@ -960,8 +973,11 @@ public class VpnHoodClient : IJob, IAsyncDisposable
         _cancellationTokenSource.Cancel();
         State = ClientState.Disconnecting;
 
+        // stop processing tunnel & adapter packets
+        _vpnAdapter.PacketReceived -= VpnAdapter_PacketReceived;
+        Tunnel.PacketReceived -= Tunnel_PacketReceived;
+
         // disposing VpnAdapter
-        _vpnAdapter.PacketReceived -= VpnAdapter_OnPacketReceived;
         if (_autoDisposeVpnAdapter) {
             VhLogger.Instance.LogDebug("Disposing the VpnAdapter...");
             _vpnAdapter.Dispose();
@@ -972,13 +988,12 @@ public class VpnHoodClient : IJob, IAsyncDisposable
 
         // Anonymous usage tracker
         _ = _clientUsageTracker?.DisposeAsync();
-
+        
         VhLogger.Instance.LogDebug("Disposing ClientHost...");
         await _clientHost.DisposeAsync().VhConfigureAwait();
 
         // Tunnel
         VhLogger.Instance.LogDebug("Disposing Tunnel...");
-        Tunnel.PacketReceived -= Tunnel_OnPacketReceived;
         await Tunnel.DisposeAsync().VhConfigureAwait();
 
         VhLogger.Instance.LogDebug("Disposing ProxyManager...");

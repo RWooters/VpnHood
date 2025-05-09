@@ -72,7 +72,7 @@ internal class ConnectorServiceBase : IAsyncDisposable, IJob
         var clientStream = binaryStreamType == BinaryStreamType.None
             ? new TcpClientStream(tcpClient, sslStream, streamId)
             : new TcpClientStream(tcpClient, new BinaryStreamStandard(sslStream, streamId, useBuffer), streamId,
-                ReuseStreamClient);
+                ReuseClientStream);
 
         clientStream.RequireHttpResponse = true;
         return clientStream;
@@ -86,7 +86,7 @@ internal class ConnectorServiceBase : IAsyncDisposable, IJob
         var hostName = EndPointInfo.HostName;
 
         // create new stream
-        var tcpClient = _socketFactory.CreateTcpClient(tcpEndPoint.AddressFamily);
+        var tcpClient = _socketFactory.CreateTcpClient(tcpEndPoint);
 
         // Client.SessionTimeout does not affect in ConnectAsync
         VhLogger.Instance.LogDebug(GeneralEventId.Tcp, "Establishing a new TCP to the Server... EndPoint: {EndPoint}",
@@ -123,7 +123,7 @@ internal class ConnectorServiceBase : IAsyncDisposable, IJob
         return null;
     }
 
-    private Task ReuseStreamClient(IClientStream clientStream)
+    private Task ReuseClientStream(IClientStream clientStream)
     {
         _freeClientStreams.Enqueue(new ClientStreamItem { ClientStream = clientStream });
         return Task.CompletedTask;

@@ -31,7 +31,7 @@ public class ServerHost : IAsyncDisposable, IJob
     private readonly List<Task> _tcpListenerTasks = [];
     private bool _disposed;
 
-    public const int MaxProtocolVersion = 6;
+    public const int MaxProtocolVersion = 8;
     public const int MinProtocolVersion = 4;
     public int MinClientProtocolVersion { get; set; } = MinProtocolVersion; // used for tests
     public JobSection JobSection { get; } = new(TimeSpan.FromMinutes(5));
@@ -49,11 +49,10 @@ public class ServerHost : IAsyncDisposable, IJob
         JobRunner.Default.Add(this);
     }
 
-    public async Task Configure(IPEndPoint[] tcpEndPoints, IPEndPoint[] udpEndPoints,
-        IPAddress[]? dnsServers, X509Certificate2[] certificates)
+    internal async Task Configure(ServerHostConfiguration configuration)
     {
-        if (VhUtils.IsNullOrEmpty(certificates))
-            throw new ArgumentNullException(nameof(certificates), "No certificate has been configured.");
+        if (VhUtils.IsNullOrEmpty(configuration.Certificates))
+            throw new ArgumentNullException(nameof(configuration.Certificates), "No certificate has been configured.");
 
         if (_disposed)
             throw new ObjectDisposedException(GetType().Name);
@@ -62,17 +61,22 @@ public class ServerHost : IAsyncDisposable, IJob
         using var lockResult = await _configureLock.LockAsync(_cancellationTokenSource.Token).VhConfigureAwait();
 
         // reconfigure
-        DnsServers = dnsServers;
-        Certificates = certificates.Select(x => new CertificateHostName(x)).ToArray();
+        DnsServers = configuration.DnsServers;
+        Certificates = configuration.Certificates.Select(x => new CertificateHostName(x)).ToArray();
 
         // Configure
-        await Task.WhenAll(ConfigureUdpListeners(udpEndPoints), ConfigureTcpListeners(tcpEndPoints)).VhConfigureAwait();
+        await Task.WhenAll(
+            ConfigureTcpListeners(configuration.TcpEndPoints),
+            ConfigureUdpListeners(configuration.UdpEndPoints, 
+                configuration.UdpSendBufferSize, 
+                configuration.UdpReceiveBufferSize)
+        ).VhConfigureAwait();
         _tcpListenerTasks.RemoveAll(x => x.IsCompleted);
     }
 
     private readonly AsyncLock _configureLock = new();
 
-    private Task ConfigureUdpListeners(IPEndPoint[] udpEndPoints)
+    private Task ConfigureUdpListeners(IPEndPoint[] udpEndPoints, int? sendBufferSize, int? receiveBufferSize)
     {
         // UDP port zero must be specified in preparation
         if (udpEndPoints.Any(x => x.Port == 0))
@@ -111,6 +115,11 @@ public class ServerHost : IAsyncDisposable, IJob
                 ex.Data.Add("UdpEndPoint", udpEndPoint);
                 throw;
             }
+        }
+
+        // reconfigure all transmitters
+        foreach (var udpChannelTransmitter in _udpChannelTransmitters) {
+            udpChannelTransmitter.Configure(sendBufferSize, receiveBufferSize);
         }
 
         return Task.CompletedTask;
@@ -288,7 +297,7 @@ public class ServerHost : IAsyncDisposable, IJob
                     };
 
                 // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-                case BinaryStreamType.Standard when protocolVersion == 6:
+                case BinaryStreamType.Standard when protocolVersion >= 6:
                     return new TcpClientStream(tcpClient,
                         new BinaryStreamStandard(sslStream, streamId, useBuffer),
                         streamId, ReuseClientStream) {
@@ -360,8 +369,7 @@ public class ServerHost : IAsyncDisposable, IJob
     {
         lock (_clientStreams) _clientStreams.Add(clientStream);
         using var timeoutCt = new CancellationTokenSource(_sessionManager.SessionOptions.TcpReuseTimeoutValue);
-        using var cancellationTokenSource =
-            CancellationTokenSource.CreateLinkedTokenSource(timeoutCt.Token, _cancellationTokenSource.Token);
+        using var cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(timeoutCt.Token, _cancellationTokenSource.Token);
         var cancellationToken = cancellationTokenSource.Token;
 
         // don't add new client in disposing
@@ -393,8 +401,7 @@ public class ServerHost : IAsyncDisposable, IJob
 
     private async Task ProcessClientStream(IClientStream clientStream, CancellationToken cancellationToken)
     {
-        using var scope =
-            VhLogger.Instance.BeginScope($"RemoteEp: {VhLogger.Format(clientStream.IpEndPointPair.RemoteEndPoint)}");
+        using var scope = VhLogger.Instance.BeginScope($"RemoteEp: {VhLogger.Format(clientStream.IpEndPointPair.RemoteEndPoint)}");
         try {
             await ProcessRequest(clientStream, cancellationToken).VhConfigureAwait();
         }
@@ -533,12 +540,12 @@ public class ServerHost : IAsyncDisposable, IJob
             "Creating a session... TokenId: {TokenId}, ClientId: {ClientId}, ClientVersion: {ClientVersion}, UserAgent: {UserAgent}",
             VhLogger.FormatId(request.TokenId), VhLogger.FormatId(request.ClientInfo.ClientId),
             request.ClientInfo.ClientVersion, request.ClientInfo.UserAgent);
-        var sessionResponseEx = await _sessionManager.CreateSession(request, ipEndPointPair).VhConfigureAwait();
+        var sessionResponseEx = await _sessionManager.CreateSession(request, ipEndPointPair, protocolVersion).VhConfigureAwait();
         var session = _sessionManager.GetSessionById(sessionResponseEx.SessionId) ??
                       throw new InvalidOperationException("Session is lost!");
 
         // check client version; unfortunately it must be after CreateSession to preserve server anonymity
-        if (request.ClientInfo == null || request.ClientInfo.ProtocolVersion < MinClientProtocolVersion)
+        if (request.ClientInfo == null || protocolVersion < MinClientProtocolVersion)
             throw new ServerSessionException(clientStream.IpEndPointPair.RemoteEndPoint, session,
                 SessionErrorCode.UnsupportedClient, request.RequestId,
                 "This client is outdated and not supported anymore! Please update your app.");
@@ -594,9 +601,10 @@ public class ServerHost : IAsyncDisposable, IJob
             ServerVersion = _sessionManager.ServerVersion.ToString(3),
 #pragma warning disable CS0618 // Type or member is obsolete
             ServerProtocolVersion = protocolVersion,
-#pragma warning restore CS0618 // Type or member is obsolete
-            MaxProtocolVersion = MaxProtocolVersion,
+            MaxProtocolVersion = 7,
             MinProtocolVersion = MinProtocolVersion,
+#pragma warning restore CS0618 // Type or member is obsolete
+            ProtocolVersion = sessionResponseEx.ProtocolVersion,
             SuppressedTo = sessionResponseEx.SuppressedTo,
             MaxDatagramChannelCount = session.Tunnel.MaxDatagramChannelCount,
             ClientPublicAddress = ipEndPointPair.RemoteEndPoint.Address,
@@ -616,7 +624,7 @@ public class ServerHost : IAsyncDisposable, IJob
             ServerLocation = sessionResponseEx.ServerLocation,
             ServerTags = sessionResponseEx.ServerTags,
             AccessInfo = sessionResponseEx.AccessInfo,
-            IsTunProviderSupported = _sessionManager.IsTunProviderSupported,
+            IsTunProviderSupported = _sessionManager.IsVpnAdapterSupported,
             ClientCountry = sessionResponseEx.ClientCountry,
             VirtualIpNetworkV4 = new IpNetwork(session.VirtualIps.IpV4, _sessionManager.VirtualIpNetworkV4.PrefixLength),
             VirtualIpNetworkV6 = new IpNetwork(session.VirtualIps.IpV6, _sessionManager.VirtualIpNetworkV6.PrefixLength)

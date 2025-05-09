@@ -19,6 +19,7 @@ public class VpnServiceHost : IAsyncDisposable
     private readonly ISocketFactory _socketFactory;
     private readonly LogService? _logService;
     private bool _isDisposed;
+    private readonly TimeSpan _killServiceTimeout = TimeSpan.FromSeconds(120);
 
     internal VpnHoodClient? Client { get; private set; }
     internal VpnHoodClient RequiredClient => Client ?? throw new InvalidOperationException("Client is not initialized.");
@@ -40,7 +41,7 @@ public class VpnServiceHost : IAsyncDisposable
 
         // write initial state including api endpoint and key
         _ = Context.WriteConnectionInfo(BuildConnectionInfo(ClientState.None, null));
-        VhLogger.Instance.LogDebug("VpnServiceHost has been initiated...");
+        VhLogger.Instance.LogInformation("VpnServiceHost has been initiated...");
     }
 
     private void VpnHoodClient_StateChanged(object sender, EventArgs e)
@@ -72,9 +73,11 @@ public class VpnServiceHost : IAsyncDisposable
         client.StateChanged -= VpnHoodClient_StateChangedForDisposal;
 
         // let the service stop if there is no client
-        Task.Delay(10000).ContinueWith(_ => {
-            if (Client == null)
+        Task.Delay(_killServiceTimeout).ContinueWith(_ => {
+            if (Client == client) {
+                VhLogger.Instance.LogDebug("VpnServiceHost requests to StopSelf.");
                 _vpnServiceHandler.StopSelf();
+            }
         });
     }
 
@@ -86,8 +89,12 @@ public class VpnServiceHost : IAsyncDisposable
         // handle previous client
         var client = Client;
         if (!forceReconnect && client is { State: ClientState.Connected or ClientState.Connecting or ClientState.Waiting }) {
+            // user must disconnect first
             VhLogger.Instance.LogWarning("VpnService connection is already in progress.");
-            return; // user must disconnect first
+
+            // update last state
+            _ = Context.WriteConnectionInfo(client.ToConnectionInfo(_apiController));
+            return; 
         }
 
         var clientOptions = Context.ReadClientOptions();
@@ -102,7 +109,8 @@ public class VpnServiceHost : IAsyncDisposable
                 SessionInfo = null,
                 SessionStatus = null,
                 Error = null,
-                SessionName = clientOptions.SessionName
+                SessionName = clientOptions.SessionName,
+                HasSetByService = true
             };
 
         // show notification as soon as possible
@@ -190,7 +198,8 @@ public class VpnServiceHost : IAsyncDisposable
             ApiEndPoint = _apiController.ApiEndPoint,
             ApiKey = _apiController.ApiKey,
             ClientState = clientState,
-            Error = ex?.ToApiError()
+            Error = ex?.ToApiError(),
+            HasSetByService = true
         };
 
         return connectionInfo;
@@ -224,10 +233,11 @@ public class VpnServiceHost : IAsyncDisposable
         _ = Client?.DisposeAsync();
     }
 
+    
     public async ValueTask DisposeAsync()
     {
-        VhLogger.Instance.LogDebug("VpnService Host is destroying...");
         if (_isDisposed) return;
+        VhLogger.Instance.LogDebug("VpnService Host is destroying...");
 
         // dispose client
         var client = Client;

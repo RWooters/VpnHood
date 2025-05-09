@@ -256,14 +256,9 @@ public class ClientAppTest : TestAppBase
 
             // UDP
             oldReceivedByteCount = app.GetSessionStatus().SessionTraffic.Received;
-            try {
-                await TestHelper.Test_Udp(TestConstants.UdpV4EndPoint2, timeout: 1000);
-                Assert.Fail("Exception expected as server should not exists.");
-            }
-            catch (Exception ex) {
-                Assert.AreEqual(nameof(OperationCanceledException), ex.GetType().Name);
-            }
-
+            await Assert.ThrowsAsync<OperationCanceledException>(() => TestHelper.Test_Udp(TestConstants.UdpV4EndPoint2, timeout: 1000),
+                "Exception ws expected as server should not exists.");
+     
             Assert.AreEqual(oldReceivedByteCount, app.GetSessionStatus().SessionTraffic.Received);
         }
 
@@ -499,8 +494,7 @@ public class ClientAppTest : TestAppBase
 
         Assert.IsTrue(isTokenRetrieved);
         Assert.AreNotEqual(token1.ServerToken.CreatedTime, token2.ServerToken.CreatedTime);
-        Assert.AreEqual(token2.ServerToken.CreatedTime,
-            app.ClientProfileService.GetToken(token1.TokenId).ServerToken.CreatedTime);
+        Assert.AreEqual(token2.ServerToken.CreatedTime, app.ClientProfileService.GetToken(token1.TokenId).ServerToken.CreatedTime);
         Assert.AreEqual(AppConnectionState.Connected, app.State.ConnectionState);
     }
 

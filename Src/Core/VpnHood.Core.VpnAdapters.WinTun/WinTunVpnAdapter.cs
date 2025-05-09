@@ -24,6 +24,7 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
 
     public const int MinRingCapacity = 0x20000; // 128kiB
     public const int MaxRingCapacity = 0x4000000; // 64MiB
+    protected override bool IsSocketProtectedByBind => true;
     public override bool IsNatSupported => true;
     public override bool IsAppFilterSupported => false;
     protected override string? AppPackageId => null;
@@ -46,10 +47,20 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
         // Set UUID version (5: SHA-1-based name-based UUID)
         guidBytes[7] = (byte)((guidBytes[7] & 0x0F) | 0x50); // set version to 5
         guidBytes[8] = (byte)((guidBytes[8] & 0x3F) | 0x80); // set variant to RFC 4122
-        
+
         var adapterGuid = new Guid(guidBytes);
         return adapterGuid;
     }
+
+    //public static int GetAdapterIndex(Guid adapterId)
+    //{
+    //    var adapter = NetworkInterface.GetAllNetworkInterfaces()
+    //        .Single(x => Guid.TryParse(x.Id, out var id) && id == adapterId);
+
+    //    var ipProps = adapter.GetIPProperties();
+    //    var index = ipProps.GetIPv4Properties()?.Index ?? -1;
+    //    return index;
+    //}
 
     protected override Task AdapterAdd(CancellationToken cancellationToken)
     {
@@ -74,7 +85,7 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
 
         // Remove previous NAT iptables record
         if (UseNat) {
-            Logger.LogDebug("Removing previous NAT iptables record for {AdapterName} TUN adapter...", AdapterName);
+            VhLogger.Instance.LogDebug("Removing previous NAT iptables record for {AdapterName} TUN adapter...", AdapterName);
             if (AdapterIpNetworkV4 != null)
                 TryRemoveNat(AdapterIpNetworkV4);
 
@@ -87,13 +98,13 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
     {
 
         // start WinTun session
-        Logger.LogInformation("Starting WinTun session...");
+        VhLogger.Instance.LogInformation("Starting WinTun session...");
         _tunSession = WinTunApi.WintunStartSession(_tunAdapter, _ringCapacity);
         if (_tunSession == IntPtr.Zero)
             throw new Win32Exception("Failed to start WinTun session.");
 
         // create an event object to wait for packets
-        Logger.LogDebug("Creating event object for WinTun...");
+        VhLogger.Instance.LogDebug("Creating event object for WinTun...");
         _readEvent = WinTunApi.WintunGetReadWaitEvent(_tunSession); // do not close this handle by documentation
 
         return Task.CompletedTask;
@@ -134,11 +145,11 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
         await OsUtils.ExecuteCommandAsync("netsh", command, cancellationToken);
     }
 
-    protected override async Task AddRoute(IpNetwork ipNetwork, IPAddress gatewayIp, CancellationToken cancellationToken)
+    protected override async Task AddRoute(IpNetwork ipNetwork, CancellationToken cancellationToken)
     {
         var command = ipNetwork.IsV4
-            ? $"interface ipv4 add route {ipNetwork} \"{AdapterName}\" {gatewayIp}"
-            : $"interface ipv6 add route {ipNetwork} \"{AdapterName}\" {gatewayIp}";
+            ? $"interface ipv4 add route {ipNetwork} \"{AdapterName}\""
+            : $"interface ipv6 add route {ipNetwork} \"{AdapterName}\"";
 
         await OsUtils.ExecuteCommandAsync("netsh", command, cancellationToken);
     }
@@ -166,9 +177,9 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
     {
         // remove previous DNS servers
         VhLogger.Instance.LogDebug("Removing previous DNS from the adapter...");
-        await VhUtils.TryInvokeAsync("Remove previous DNS", 
+        await VhUtils.TryInvokeAsync("Remove previous DNS",
             () => OsUtils.ExecuteCommandAsync("netsh", $"netsh interface ipv4 delete dns \"{AdapterName}\" all", cancellationToken));
-        
+
         VhLogger.Instance.LogDebug("Adding new DNS to the adapter...");
         foreach (var ipAddress in dnsServers) {
             var command = ipAddress.IsV4()
@@ -263,13 +274,13 @@ public class WinTunVpnAdapter(WinVpnAdapterSettings adapterSettings)
                     throw new IOException("WinTun adapter has been closed.");
 
                 case WintunReceivePacketError.InvalidData:
-                    Logger.LogWarning("Invalid data received from WinTun adapter.");
+                    VhLogger.Instance.LogWarning("Invalid data received from WinTun adapter.");
                     if (++errorCount > maxErrorCount)
                         throw new InvalidOperationException("Too many invalid data received from WinTun adapter."); // read the next packet
                     continue; // read the next packet
 
                 default:
-                    Logger.LogDebug("Unknown error in reading packet from WinTun. LastError: {lastError}", lastError);
+                    VhLogger.Instance.LogDebug("Unknown error in reading packet from WinTun. LastError: {lastError}", lastError);
                     if (++errorCount > maxErrorCount)
                         throw new InvalidOperationException("Too many errors in reading packet from WinTun."); // read the next packet
                     continue; // read the next packet

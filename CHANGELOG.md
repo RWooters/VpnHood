@@ -1,13 +1,22 @@
+# v6.0.696
+* Fix: Instability of pressing the connect and disconnect buttons
+* Fix: Up speed and down speed show in the wrong place
+* Fix: Android: VpnKey remains connected after disconnect
+* Feature: Windows: Allow use IPv6 even when client does not have IPv6
+* Improve: Watching media streaming
+* Improve: Performance and stability
+* Improve: UDP Speed
+
 # v6.0.676
 * Fix: Improve security by blocking multicast traffic
-* Feature: Android: Run VPN in a separate process
-* Feature: Android: Using separate process for VPN service
-* Feature: Android: Edge to Edge UI
+* Fix: No internet connection on some devices
 * Fix: Android: Menu goes beneath system tray
 * Fix: Some ANR and crashes
+* Fix: Connect/Disconnect issues
+* Feature: Android: Using a separate process for VPN service
+* Feature: Android: Edge-to-Edge UI
 * Improve: virtual ip allocation
 * Improve: UI
-* Fix: Connect/Disconnect issues
 
 # v5.1.654
 * Fix: IPv6 ping
@@ -15,9 +24,9 @@
 * Fix: Connection is already in progress by changing the location
 
 # v5.0.645
-* Improve: Improve performance by reducing memory allocation.
-* Improve: Improve UI.
-* Feature: Add statistics page.
+* Improve: Improve performance by reducing memory allocation
+* Improve: Improve UI
+* Feature: Add statistics page
 
 # v5.0.635
 * Fix: Sign-out from account

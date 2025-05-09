@@ -1,5 +1,7 @@
-﻿using PacketDotNet;
+﻿using System.Net;
+using PacketDotNet;
 using System.Net.Sockets;
+using VpnHood.Core.Packets;
 
 namespace VpnHood.Core.VpnAdapters.Abstractions;
 
@@ -10,7 +12,8 @@ public interface IVpnAdapter : IDisposable
     bool Started { get; }
     bool IsNatSupported { get; }
     bool CanProtectSocket { get; }
-    void ProtectSocket(Socket socket);
+    bool ProtectSocket(Socket socket);
+    bool ProtectSocket(Socket socket, IPAddress ipAddress);
     Task Start(VpnAdapterOptions options, CancellationToken cancellationToken);
     void Stop();
     void SendPacket(IPPacket ipPacket);

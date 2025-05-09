@@ -18,6 +18,7 @@ using VpnHood.Core.Tunneling.ClientStreams;
 using VpnHood.Core.Tunneling.Messaging;
 using VpnHood.Core.Tunneling.Sockets;
 using VpnHood.Core.Tunneling.Utils;
+using VpnHood.Core.VpnAdapters.Abstractions;
 using ProtocolType = PacketDotNet.ProtocolType;
 
 namespace VpnHood.Core.Server;
@@ -38,6 +39,9 @@ public class Session : IAsyncDisposable
     private readonly TrackingOptions _trackingOptions;
     private IPAddress? _clientInternalIpV6;
     private IPAddress? _clientInternalIpV4;
+
+    [Obsolete]
+    private readonly bool _fixClientInternalIp;
 
     private readonly EventReporter _netScanExceptionReporter = new(VhLogger.Instance,
         "NetScan protector does not allow this request.", GeneralEventId.NetProtect);
@@ -70,8 +74,8 @@ public class Session : IAsyncDisposable
     public DateTime LastActivityTime => Tunnel.LastActivityTime;
     public VirtualIpBundle VirtualIps { get; }
 
-    internal Session(IAccessManager accessManager, 
-        ITunProvider? tunProvider,
+    internal Session(IAccessManager accessManager,
+        IVpnAdapter? vpnAdapter,
         INetFilter netFilter,
         ISocketFactory socketFactory,
         SessionResponseEx sessionResponseEx,
@@ -84,15 +88,18 @@ public class Session : IAsyncDisposable
         var logScope = new LogScope();
         logScope.Data.Add(sessionTuple);
 
+#pragma warning disable CS0612 // Type or member is obsolete
+        _fixClientInternalIp = sessionResponseEx.ProtocolVersion < 8;
+#pragma warning restore CS0612 // Type or member is obsolete
         _accessManager = accessManager ?? throw new ArgumentNullException(nameof(accessManager));
         _socketFactory = socketFactory ?? throw new ArgumentNullException(nameof(socketFactory));
-        _proxyManager = new SessionProxyManager(this, socketFactory, tunProvider, new ProxyManagerOptions {
+        _proxyManager = new SessionProxyManager(this, socketFactory, vpnAdapter, new ProxyManagerOptions {
             UdpTimeout = options.UdpTimeoutValue,
             IcmpTimeout = options.IcmpTimeoutValue,
             MaxUdpClientCount = options.MaxUdpClientCountValue,
             MaxIcmpClientCount = options.MaxIcmpClientCountValue,
-            UdpReceiveBufferSize = options.UdpReceiveBufferSize,
-            UdpSendBufferSize = options.UdpSendBufferSize,
+            UdpReceiveBufferSize = options.UdpProxyReceiveBufferSize,
+            UdpSendBufferSize = options.UdpProxySendBufferSize,
             UseUdpProxy2 = options.UseUdpProxy2Value,
             LogScope = logScope
         });
@@ -181,30 +188,36 @@ public class Session : IAsyncDisposable
     }
 
     // todo: legacy version. remove in future
+    [Obsolete]
     private IPAddress? GetClientInternalIp(IPVersion ipVersion)
     {
         return ipVersion == IPVersion.IPv4 ? _clientInternalIpV4 : _clientInternalIpV6;
     }
 
-    public Task ProcessInboundPacket(IPPacket ipPacket)
+    public void Proxy_OnPacketReceived(IPPacket ipPacket)
     {
+        if (IsDisposed) return;
         if (VhLogger.IsDiagnoseMode)
-            PacketLogger.LogPacket(ipPacket, "Delegating packet to client via proxy.");
+            PacketLogger.LogPacket(ipPacket, "Delegating a packet to client.");
 
         ipPacket = _netFilter.ProcessReply(ipPacket);
 
-        // fix client internal ip
-        // todo: consider using allocated private ip and prevent recalculate checksum
-        var clientInternalIp = GetClientInternalIp(ipPacket.Version);
-        if (clientInternalIp != null && !ipPacket.DestinationAddress.Equals(clientInternalIp)) {
-            ipPacket.DestinationAddress = clientInternalIp;
-            ipPacket.UpdateIpChecksum();
+#pragma warning disable CS0612 // Type or member is obsolete
+        if (_fixClientInternalIp) {
+            // fix client internal ip
+            // todo: consider using allocated private ip and prevent recalculate checksum
+            var clientInternalIp = GetClientInternalIp(ipPacket.Version);
+            if (clientInternalIp != null && !ipPacket.DestinationAddress.Equals(clientInternalIp)) {
+                ipPacket.DestinationAddress = clientInternalIp;
+                ipPacket.UpdateIpChecksum();
+            }
         }
+#pragma warning restore CS0612 // Type or member is obsolete
 
-        return Tunnel.SendPacketAsync(ipPacket, CancellationToken.None);
+        Tunnel.SendPacketEnqueue(ipPacket);
     }
 
-    private void Tunnel_OnPacketReceived(object sender, ChannelPacketReceivedEventArgs e)
+    private void Tunnel_OnPacketReceived(object sender, PacketReceivedEventArgs e)
     {
         if (IsDisposed)
             return;
@@ -213,20 +226,30 @@ public class Session : IAsyncDisposable
         // ReSharper disable once ForCanBeConvertedToForeach
         for (var i = 0; i < e.IpPackets.Count; i++) {
             var ipPacket = e.IpPackets[i];
+            var virtualIp = GetClientVirtualIp(ipPacket.Version);
 
             // todo: legacy save caller internal ip at first call
-            if (ipPacket.Version == IPVersion.IPv4)
-                _clientInternalIpV4 ??= ipPacket.SourceAddress;
-            else if (ipPacket.Version == IPVersion.IPv6)
-                _clientInternalIpV6 ??= ipPacket.SourceAddress;
+#pragma warning disable CS0612 // Type or member is obsolete
+            if (_fixClientInternalIp) {
+                if (ipPacket.Version == IPVersion.IPv4)
+                    _clientInternalIpV4 ??= ipPacket.SourceAddress;
+                else if (ipPacket.Version == IPVersion.IPv6)
+                    _clientInternalIpV6 ??= ipPacket.SourceAddress;
 
-            // update source client virtual ip. will be obsolete in future if client set correct ip
-            var virtualIp = GetClientVirtualIp(ipPacket.Version);
-            if (!virtualIp.Equals(ipPacket.SourceAddress)) {
-                // todo: legacy version. Packet must be dropped if it does not have correct source address
-                // PacketLogger.LogPacket(ipPacket, $"Invalid tunnel packet source ip.");
-                ipPacket.SourceAddress = virtualIp;
-                ipPacket.UpdateIpChecksum();
+                // update source client virtual ip. will be obsolete in future if client set correct ip
+                if (!virtualIp.Equals(ipPacket.SourceAddress)) {
+                    // todo: legacy version. Packet must be dropped if it does not have correct source address
+                    // PacketLogger.LogPacket(ipPacket, $"Invalid tunnel packet source ip.");
+                    ipPacket.SourceAddress = virtualIp;
+                    ipPacket.UpdateIpChecksum();
+                }
+            }
+#pragma warning restore CS0612 // Type or member is obsolete
+
+            // reject if packet source does not match client internal ip
+            if (!ipPacket.SourceAddress.Equals(virtualIp)) {
+                PacketLogger.LogPacket(ipPacket, "Invalid tunnel packet source ip.");
+                continue;
             }
 
             // filter
@@ -351,7 +374,7 @@ public class Session : IAsyncDisposable
             isTcpConnectIncreased = true;
 
             //set reuseAddress to  true to prevent error only one usage of each socket address is normally permitted
-            tcpClientHost = _socketFactory.CreateTcpClient(request.DestinationEndPoint.AddressFamily);
+            tcpClientHost = _socketFactory.CreateTcpClient(request.DestinationEndPoint);
             VhUtils.ConfigTcpClient(tcpClientHost, _tcpKernelSendBufferSize, _tcpKernelReceiveBufferSize);
 
             // connect to requested destination
@@ -467,21 +490,22 @@ public class Session : IAsyncDisposable
     private class SessionProxyManager(
         Session session,
         ISocketFactory socketFactory,
-        ITunProvider? tunProvider,
+        IVpnAdapter? vpnAdapter,
         ProxyManagerOptions options)
         : ProxyManager(socketFactory, options)
     {
         protected override bool IsPingSupported => true;
 
-        public override Task OnPacketReceived(IPPacket ipPacket)
+        public override void OnPacketReceived(IPPacket ipPacket)
         {
-            return session.ProcessInboundPacket(ipPacket);
+            if (session.IsDisposed) return;
+            session.Proxy_OnPacketReceived(ipPacket);
         }
 
         public override Task SendPacket(IPPacket ipPacket)
         {
-            if (tunProvider != null) {
-                tunProvider.SendPacket(ipPacket);
+            if (vpnAdapter != null) {
+                vpnAdapter.SendPacket(ipPacket);
                 return Task.CompletedTask;
             }
 

@@ -5,8 +5,8 @@
 		<RootNamespace>VpnHood.App.Connect.Droid.Web</RootNamespace>
 		<OutputType>Exe</OutputType>
 		<ApplicationId>com.vpnhood.connect.android.web.debug</ApplicationId>
-		<ApplicationVersion>676</ApplicationVersion>
-		<ApplicationDisplayVersion>6.0.676</ApplicationDisplayVersion>
+		<ApplicationVersion>696</ApplicationVersion>
+		<ApplicationDisplayVersion>6.0.696</ApplicationDisplayVersion>
 		<SupportedOSPlatformVersion>24.0</SupportedOSPlatformVersion>
 		<DebugSymbols>True</DebugSymbols>
 	</PropertyGroup>
@@ -25,6 +25,10 @@
 		<LangVersion>latest</LangVersion>
 	</PropertyGroup>
 
+	<PropertyGroup Condition="'$(Configuration)'=='Release'">
+		<PathMap>$(SolutionDir)=.</PathMap>
+	</PropertyGroup>
+
 	<PropertyGroup>
 		<PackageLicenseExpression>LGPL-2.1-only</PackageLicenseExpression>
 		<Company>OmegaHood LLC</Company>
@@ -32,7 +36,7 @@
 		<PackageIcon>VpnHood.png</PackageIcon>
 		<PackageProjectUrl>https://github.com/vpnhood/vpnhood</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/vpnhood/vpnhood</RepositoryUrl>
-		<Version>6.0.676</Version>
+		<Version>6.0.696</Version>
 		<FileVersion>$([System.DateTime]::Now.ToString("yyyy.M.d.HHmm"))</FileVersion>
 		<BaseIntermediateOutputPath />
 	</PropertyGroup>
@@ -52,7 +56,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <PackageReference Include="VpnHood.AppLib.Assets.Ip2LocationLite" Version="6.0.678" />
+	  <PackageReference Include="VpnHood.AppLib.Assets.Ip2LocationLite" Version="6.0.683" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -65,6 +69,9 @@
 	<ItemGroup>
 		<ProjectReference Include="..\..\AppLib\VpnHood.AppLib.Android.Common\VpnHood.AppLib.Android.Common.csproj" />
 		<ProjectReference Include="..\Client\VpnHood.App.Client.csproj" />
+		<PackageReference Include="AppsFlyerXamarinBindingAndroid" Version="6.15.0" />
+		<PackageReference Include="Net.Android.Installreferrer" Version="2.2.0" />
+		<PackageReference Include="Xamarin.Kotlin.StdLib" Version="2.0.21.2" />
 	</ItemGroup>
 
 </Project>

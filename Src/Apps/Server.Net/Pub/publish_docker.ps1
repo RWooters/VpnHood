@@ -31,9 +31,9 @@ $module_yamlFileName = $(Split-Path "$module_yamlFile" -leaf);
 
 # server VpnHoodServer.docker.sh
 Write-Output "Make Server installation script for this docker";
-$linuxScript = (Get-Content -Path "$template_installerFile" -Raw).Replace('$composeUrlParam', "https://github.com/vpnhood/VpnHood/releases/download/$versionTag/$module_yamlFileName");
+$linuxScript = (Get-Content -Path "$template_installerFile" -Raw).Replace('$composeUrlParam', "https://github.com/vpnhood/VpnHood.App.Server/releases/download/$versionTag/$module_yamlFileName");
 $linuxScript = $linuxScript -replace "`r`n", "`n";
-$linuxScript  | Out-File -FilePath "$module_installerFile" -Encoding ASCII -Force -NoNewline;
+$linuxScript | Out-File -FilePath "$module_installerFile" -Encoding ASCII -Force -NoNewline;
 
 # copy compose file
 Copy-Item -path "$template_yamlFile" -Destination "$module_yamlFile" -Force;
